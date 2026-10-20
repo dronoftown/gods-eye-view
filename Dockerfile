@@ -33,11 +33,19 @@ RUN mkdir -p node_modules/.vite && chmod 777 node_modules node_modules/.vite
 
 COPY --chown=node:node . .
 
+# Compile browser assets during image build, when Render gives Docker build
+# its own resources; do not compile on the 512 MB runtime instance.
+# This is an experiment: the app's client-exposed provider tokens are build-time
+# values, so only keyless frontend features are expected in this first test.
+RUN npm run build
+
 # Bind to all interfaces, otherwise the published port hits nothing. This does
 # not widen the Host allowlist: IP addresses and localhost are accepted, other
 # names only via GEV_ALLOWED_HOSTS (see build/allowedHosts.js).
 ENV HOST=0.0.0.0
 ENV PORT=4173
+# Opt into preview for this experimental Render branch only.
+ENV GEV_RENDER_PRODUCTION=1
 EXPOSE 4173
 # The launcher is `npm run dev` plus one step: it trusts the container's
 # gateway address for Provider Settings, because that is where Docker delivers
