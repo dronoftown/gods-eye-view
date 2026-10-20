@@ -147,7 +147,11 @@ async function start() {
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, async () => {
-      await server.close();
+      if (productionPreview) {
+        await new Promise((resolve) => server.httpServer.close(resolve));
+      } else {
+        await server.close();
+      }
       process.exit(0);
     });
   }
