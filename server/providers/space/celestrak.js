@@ -118,8 +118,12 @@ export function celestrakProxy() {
                 return fresh;
               })
               .catch((err) => {
+                const kind = String(err?.name || 'Error').slice(0, 50);
+                const detail = String(err?.message || 'unknown failure')
+                  .replace(/[\r\n\t]/g, ' ')
+                  .slice(0, 180);
                 console.warn(
-                  '[celestrak-proxy] refresh failed — serving cache if any',
+                  `[celestrak-proxy] refresh failed (${kind}: ${detail}) — serving cache if any`,
                 );
                 return null;
               })
