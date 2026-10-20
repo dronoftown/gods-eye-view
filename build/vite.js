@@ -74,17 +74,19 @@ export function createBrowserViteConfig({
     // server is still serving optimized module URLs from.
     ...(command === 'build' ? { cacheDir: 'node_modules/.vite-build' } : {}),
     optimizeDeps: {
-      // First reached through the SDR worker or a dynamic import. Pre-bundle
-      // them at startup so first use cannot invalidate already-transformed
-      // URLs with Vite's "Outdated Optimize Dep" 504 response.
-      include: [
-        '@jtarrio/signals/demod/demodulator.js',
-        '@jtarrio/signals/demod/modes.js',
-        '@jtarrio/webrtlsdr/rtlsdr.js',
-        'egm96-universal',
-        // Loaded on demand when the first street-level image opens.
-        'mapillary-js',
-      ],
+      // Render Free experiment: do not eagerly transform these large optional
+      // modules during startup. Vite will transform them on first use.
+      // This may reduce startup memory but can cause first-use latency or
+      // a Vite dependency invalidation; verify those layers before merging.
+      include: process.env.GEV_LOW_MEMORY_MODE === '1'
+        ? []
+        : [
+            '@jtarrio/signals/demod/demodulator.js',
+            '@jtarrio/signals/demod/modes.js',
+            '@jtarrio/webrtlsdr/rtlsdr.js',
+            'egm96-universal',
+            'mapillary-js',
+          ],
     },
     server: {
       host: host || 'localhost',
