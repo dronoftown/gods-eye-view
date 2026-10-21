@@ -81,6 +81,7 @@ export function celestrakProxy() {
   // Read-only fallback; do not retry the unavailable origin on every request.
   const MIRROR_GROUPS = new Set([
     'stations', 'visual', 'active', 'last-30-days', 'analyst',
+    'gps-ops', 'glo-ops', 'galileo', 'geo',
     'starlink', 'oneweb', 'kuiper', 'qianfan', 'hulianwang',
     'fengyun-1c-debris', 'cosmos-2251-debris', 'iridium-33-debris',
     'cosmos-1408-debris', 'decaying', 'gpz', 'gpz-plus',
