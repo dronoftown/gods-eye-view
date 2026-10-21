@@ -74,7 +74,26 @@ export function celestrakProxy() {
     );
     // An upstream error page parses to zero TLEs — treat as failure, keep cache.
     if (!/^1 /m.test(body)) throw new Error('no TLE lines in response');
-    return { at: Date.now(), body };
+    return { at: Date.now(), body, source: 'CELESTRAK' };
+  }
+
+  // Independent static mirror for groups confirmed published by Satvisor.
+  // Read-only fallback; do not retry the unavailable origin on every request.
+  const MIRROR_GROUPS = new Set([
+    'stations', 'visual', 'active', 'last-30-days', 'analyst',
+    'starlink', 'oneweb', 'kuiper', 'qianfan', 'hulianwang',
+    'fengyun-1c-debris', 'cosmos-2251-debris', 'iridium-33-debris',
+    'cosmos-1408-debris', 'decaying', 'gpz', 'gpz-plus',
+  ]);
+  async function fetchMirror(group) {
+    if (!MIRROR_GROUPS.has(group)) return null;
+    const url = `https://raw.githubusercontent.com/satvisorcom/satvisor-data/master/celestrak/tle/${group}.tle`;
+    const signal = AbortSignal.timeout(12000);
+    const res = await fetch(url, { signal });
+    if (!res.ok) throw new Error(`mirror HTTP ${res.status}`);
+    const body = await readResponseTextCapped(res, CELESTRAK_MAX_RESPONSE_BYTES, signal);
+    if (!/^1 /m.test(body) || !/^2 /m.test(body)) throw new Error('invalid mirror TLE');
+    return { at: Date.now(), body, source: 'MIRROR' };
   }
 
   const installMiddleware = (server) => {
@@ -106,7 +125,7 @@ export function celestrakProxy() {
           if (entry) mem.set(group, entry);
         }
         if (entry && now - entry.at < TLE_TTL_MS) {
-          send(200, entry.body, 'HIT');
+          send(200, entry.body, entry.source === 'MIRROR' ? 'MIRROR-HIT' : 'HIT');
           return;
         }
         // Respect a cooldown after upstream errors; do not hammer CelesTrak.
@@ -120,6 +139,18 @@ export function celestrakProxy() {
           inflight.set(
             group,
             fetchUpstream(group)
+              .catch(async (error) => {
+                if (!MIRROR_GROUPS.has(group)) throw error;
+                try {
+                  const mirror = await fetchMirror(group);
+                  console.info(`[celestrak-proxy] ${group}: mirror fallback in use`);
+                  return mirror;
+                } catch (mirrorError) {
+                  const reason = String(mirrorError?.cause?.code || mirrorError?.message || 'unknown').slice(0, 100);
+                  console.warn(`[celestrak-proxy] ${group}: mirror also unavailable (${reason})`);
+                  throw error;
+                }
+              })
               .then(async (fresh) => {
                 retryAfter.delete(group);
                 mem.set(group, fresh);
@@ -145,7 +176,7 @@ export function celestrakProxy() {
         }
         const fresh = await inflight.get(group);
         if (fresh) {
-          send(200, fresh.body, 'MISS');
+          send(200, fresh.body, fresh.source === 'MIRROR' ? 'MIRROR' : 'MISS');
         } else if (entry) {
           send(200, entry.body, 'STALE-ERROR'); // upstream down — stale beats empty
         } else {
