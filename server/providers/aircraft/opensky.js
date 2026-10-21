@@ -140,6 +140,9 @@ const _adsbLolPointCache = new Map();
 /** Per-anchor single-flight map for concurrent regional fallback requests. */
 const _adsbLolPointInFlight = new Map();
 const ADSBLOL_POINT_CACHE_MS = 12000;
+/** Global cooldown shared by all map anchors on provider 429 responses. */
+let _adsbLolRegionalCooldownUntil = 0;
+const ADSBLOL_REGIONAL_RATE_LIMIT_BACKOFF_MS = 2 * 60_000;
 const ADSBLOL_POINT_CACHE_MAX = 80;
 const ADSBLOL_POINT_RADIUS_NM = 250;
 const ADSBLOL_POINT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -320,6 +323,12 @@ async function fetchAdsbLolPointFallback(req) {
     return { ...cached, cacheStatus: 'HIT' };
   }
 
+  // The public provider rate limit applies across map positions, not just
+  // to one anchor. Do not keep querying new locations during a 429 cooldown.
+  if (now < _adsbLolRegionalCooldownUntil) {
+    return cached ? { ...cached, cacheStatus: 'STALE' } : null;
+  }
+
   const request = coalesceProxyRequest(
     _adsbLolPointInFlight,
     cacheKey,
@@ -337,6 +346,15 @@ async function fetchAdsbLolPointFallback(req) {
             signal: controller.signal,
           },
         );
+        if (upstream.status === 429) {
+          const retryAfter = Number(upstream.headers.get('retry-after'));
+          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.max(30_000, Math.min(retryAfter * 1000, 30 * 60_000))
+            : ADSBLOL_REGIONAL_RATE_LIMIT_BACKOFF_MS;
+          _adsbLolRegionalCooldownUntil = Date.now() + waitMs;
+          void upstream.body?.cancel().catch(() => {});
+          throw new Error('upstream HTTP 429 (regional cooldown)');
+        }
         if (!upstream.ok) throw new Error(`upstream HTTP ${upstream.status}`);
         const payload = await readResponseJsonCapped(
           upstream,
