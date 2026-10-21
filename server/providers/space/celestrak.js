@@ -26,6 +26,8 @@ export function celestrakProxy() {
   const CACHE_DIR = path.join(process.cwd(), '.gev-cache');
   const mem = new Map(); // group -> { at: epochMs, body: string }
   const inflight = new Map(); // group -> Promise<{at, body}|null>
+  const retryAfter = new Map(); // group -> epochMs after failed refresh
+  const FAILED_REFRESH_BACKOFF_MS = 15 * 60_000;
 
   const diskPath = (group) => path.join(CACHE_DIR, `celestrak-${group}.json`);
 
@@ -107,23 +109,34 @@ export function celestrakProxy() {
           send(200, entry.body, 'HIT');
           return;
         }
+        // Respect a cooldown after upstream errors; do not hammer CelesTrak.
+        if (!inflight.has(group) && now < (retryAfter.get(group) || 0)) {
+          if (entry) send(200, entry.body, 'STALE-ERROR');
+          else send(502, 'celestrak temporarily unavailable; retry later', 'BACKOFF');
+          return;
+        }
         // Stale or missing → refresh, single-flight per group.
         if (!inflight.has(group)) {
           inflight.set(
             group,
             fetchUpstream(group)
               .then(async (fresh) => {
+                retryAfter.delete(group);
                 mem.set(group, fresh);
                 await writeDisk(group, fresh);
                 return fresh;
               })
               .catch((err) => {
+                retryAfter.set(group, Date.now() + FAILED_REFRESH_BACKOFF_MS);
+                const cause = err?.cause;
+                const causeCode = String(cause?.code || 'unknown').slice(0, 50);
+                const causeMessage = String(cause?.message || '').replace(/[\r\n\t]/g, ' ').slice(0, 120);
                 const kind = String(err?.name || 'Error').slice(0, 50);
                 const detail = String(err?.message || 'unknown failure')
                   .replace(/[\r\n\t]/g, ' ')
                   .slice(0, 180);
                 console.warn(
-                  `[celestrak-proxy] refresh failed (${kind}: ${detail}) — serving cache if any`,
+                  `[celestrak-proxy] refresh failed (${kind}: ${detail}; cause=${causeCode}: ${causeMessage}) — backoff 15m, serving cache if any`,
                 );
                 return null;
               })
