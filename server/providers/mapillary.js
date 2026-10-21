@@ -1,4 +1,13 @@
-import { sameSiteGated } from './common/same-site.js';
+import { admitSameSiteKeyless } from './common/same-site.js';
+
+// Public read-only tile routes: enforce same-origin browser requests while
+// permitting Render's HTTPS proxy headers. Rate limiting remains enabled.
+function proxyCompatibleSameSite(handler) {
+  return (req, res, next) => {
+    if (admitSameSiteKeyless(req, res)) return;
+    return handler(req, res, next);
+  };
+}
 import { makeRateLimiter, clientKey } from './common/rate-limit.js';
 import {
   fetchTile,
@@ -92,10 +101,10 @@ export function mapillaryProxy() {
       max: TILE_ROUTE_MAX_PER_MIN,
       globalMax: TILE_ROUTE_MAX_PER_MIN * 4,
     });
-    middlewares.use('/api/mapillary/status', sameSiteGated(handleStatus));
+    middlewares.use('/api/mapillary/status', proxyCompatibleSameSite(handleStatus));
     middlewares.use(
       '/api/mapillary/tiles',
-      sameSiteGated((req, res) => handleTile(req, res, allow)),
+      proxyCompatibleSameSite((req, res) => handleTile(req, res, allow)),
     );
   };
   return {
