@@ -28,6 +28,9 @@ let _openskyCacheSourceEpochMs = null;
 const OPENSKY_CACHE_MS = 9000;
 /** Per-attempt limit for the global snapshot; it normally arrives in ~1.5 s. */
 const OPENSKY_ATTEMPT_TIMEOUT_MS = 10_000;
+/** Avoid repeated long upstream timeouts while network access is unavailable. */
+let _openskyNetworkBackoffUntil = 0;
+const OPENSKY_NETWORK_BACKOFF_MS = 2 * 60_000;
 const OPENSKY_STATES_URL =
   'https://opensky-network.org/api/states/all?extended=1';
 /** states/all?extended=1 measures ~0.8 MB anonymously; bounded, not budgeted. */
@@ -137,6 +140,9 @@ const _adsbLolPointCache = new Map();
 /** Per-anchor single-flight map for concurrent regional fallback requests. */
 const _adsbLolPointInFlight = new Map();
 const ADSBLOL_POINT_CACHE_MS = 12000;
+/** Global cooldown shared by all map anchors on provider 429 responses. */
+let _adsbLolRegionalCooldownUntil = 0;
+const ADSBLOL_REGIONAL_RATE_LIMIT_BACKOFF_MS = 2 * 60_000;
 const ADSBLOL_POINT_CACHE_MAX = 80;
 const ADSBLOL_POINT_RADIUS_NM = 250;
 const ADSBLOL_POINT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -317,6 +323,12 @@ async function fetchAdsbLolPointFallback(req) {
     return { ...cached, cacheStatus: 'HIT' };
   }
 
+  // The public provider rate limit applies across map positions, not just
+  // to one anchor. Do not keep querying new locations during a 429 cooldown.
+  if (now < _adsbLolRegionalCooldownUntil) {
+    return cached ? { ...cached, cacheStatus: 'STALE' } : null;
+  }
+
   const request = coalesceProxyRequest(
     _adsbLolPointInFlight,
     cacheKey,
@@ -334,6 +346,15 @@ async function fetchAdsbLolPointFallback(req) {
             signal: controller.signal,
           },
         );
+        if (upstream.status === 429) {
+          const retryAfter = Number(upstream.headers.get('retry-after'));
+          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.max(30_000, Math.min(retryAfter * 1000, 30 * 60_000))
+            : ADSBLOL_REGIONAL_RATE_LIMIT_BACKOFF_MS;
+          _adsbLolRegionalCooldownUntil = Date.now() + waitMs;
+          void upstream.body?.cancel().catch(() => {});
+          throw new Error('upstream HTTP 429 (regional cooldown)');
+        }
         if (!upstream.ok) throw new Error(`upstream HTTP ${upstream.status}`);
         const payload = await readResponseJsonCapped(
           upstream,
@@ -429,6 +450,7 @@ export function openSkyProxy() {
         );
         const now = Date.now();
         const inCooldown = now < _openskyCooldownUntil;
+        const networkBackoff = now < _openskyNetworkBackoffUntil;
         // Fresh-enough cache (adaptive TTL) OR any cache during a 429
         // cooldown: serve it without touching upstream. Stale-during-cooldown
         // is deliberate (credit governor): last-good planes beat a dead layer.
@@ -471,6 +493,16 @@ export function openSkyProxy() {
             }),
           );
           res.end(_openskyCacheBody);
+          return;
+        }
+        if (networkBackoff && !_openskyCacheBody) {
+          if (await serveAdsbLolPointFallback(req, res, requestedMode, 'opensky_network_backoff_regional_fallback')) return;
+          res.writeHead(503, buildOpenSkyHeaders({
+            cacheStatus: 'BACKOFF', requestedMode, usedMode: 'none',
+            reason: 'upstream_network_unavailable',
+            retryAfterSeconds: (_openskyNetworkBackoffUntil - now) / 1000,
+          }));
+          res.end(JSON.stringify({ error: 'OpenSky temporarily unreachable; retry later.' }));
           return;
         }
         // Cooling down with nothing cached (cold start into a rate limit):
@@ -544,6 +576,7 @@ export function openSkyProxy() {
         }
 
         let { upstream, body } = await fetchOpenSkyStates(headers);
+        _openskyNetworkBackoffUntil = 0;
         // Auto-mode fallback: if OAuth was rejected, retry with Basic credentials
         if (
           (upstream.status === 401 || upstream.status === 403) &&
@@ -702,7 +735,9 @@ export function openSkyProxy() {
         );
         res.end(body);
       } catch (e) {
-        console.error('[OpenSky Proxy]', e.message);
+        _openskyNetworkBackoffUntil = Date.now() + OPENSKY_NETWORK_BACKOFF_MS;
+        const causeCode = String(e?.cause?.code || e?.name || 'unknown').slice(0, 60);
+        console.error('[OpenSky Proxy]', e.message, 'cause=', causeCode, 'backoff=120s');
         if (_openskyCacheBody) {
           const cachedMeta = _openskyCacheMeta || {
             requestedMode: normalizeOpenSkyAuthMode(

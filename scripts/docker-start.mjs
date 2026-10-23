@@ -123,24 +123,35 @@ async function start() {
   }
 
   const port = Number.parseInt(process.env.PORT, 10) || 4173;
-  const { createServer } = await loadViteFromCanonicalRoot(ROOT);
-  const server = await createServer({
-    root: ROOT,
-    server: {
-      // The container's own namespace. compose publishes this to the host's
-      // 127.0.0.1 only; widening that mapping is the LAN opt-in.
-      host: '0.0.0.0',
-      port,
-      strictPort: true,
-    },
-  });
-  await server.listen();
+  const vite = await loadViteFromCanonicalRoot(ROOT);
+  // On small hosting instances, serve the prebuilt browser assets instead of
+  // running Vite's dev transform pipeline. Vite preview also invokes each
+  // provider's configurePreviewServer hook for supported API middleware.
+  const productionPreview = process.env.GEV_RENDER_PRODUCTION === '1';
+  const server = productionPreview
+    ? await vite.preview({
+        root: ROOT,
+        preview: { host: '0.0.0.0', port, strictPort: true },
+      })
+    : await vite.createServer({
+        root: ROOT,
+        server: {
+          host: '0.0.0.0',
+          port,
+          strictPort: true,
+        },
+      });
+  if (!productionPreview) await server.listen();
   server.printUrls();
-  console.log(`[Docker] Ready at http://localhost:${port}/`);
+  console.log(`[Docker] ${productionPreview ? 'Production preview' : 'Development'} ready at http://localhost:${port}/`);
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, async () => {
-      await server.close();
+      if (productionPreview) {
+        await new Promise((resolve) => server.httpServer.close(resolve));
+      } else {
+        await server.close();
+      }
       process.exit(0);
     });
   }
